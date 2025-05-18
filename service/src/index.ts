@@ -1,18 +1,14 @@
 import { serve } from "@hono/node-server";
-import { Hono } from "hono";
 
-const app = new Hono();
-
-app.get("/", (c) => {
-  return c.text("Hello, world!");
-});
+import { config } from "@/lib/config";
+import { app } from "@/app";
 
 serve(
   {
     fetch: app.fetch,
-    port: 3000,
+    port: config.PORT,
   },
   (info) => {
-    console.log(`Server is running on http://localhost:${info.port}`);
-  }
+    console.log(`✓ Server is running on http://localhost:${info.port}`);
+  },
 );
