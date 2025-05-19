@@ -17,7 +17,7 @@ app.doc("/spec", {
   },
   tags: [
     {
-      name: "Hello, world!",
+      name: "Messages",
     },
   ],
 });

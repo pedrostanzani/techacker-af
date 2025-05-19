@@ -1,7 +1,7 @@
 import { OpenAPIHono } from "@hono/zod-openapi";
-import helloRouter from "@/modules/hello/router";
+import messageRouter from "@/modules/message/router";
 
 const router = new OpenAPIHono();
-router.route("/hello", helloRouter);
+router.route("/messages", messageRouter);
 
 export default router;

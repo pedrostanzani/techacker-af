@@ -9,11 +9,13 @@
     "format": "prettier --write src && prettier --write tests",
     "test": "vitest",
     "prepare": "cd .. && husky service/.husky",
-    "commitlint": "commitlint --edit"
+    "commitlint": "commitlint --edit",
+    "db:dev": "docker run -p 3306:3306 -e MYSQL_ROOT_PASSWORD=12345678 mysql"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",
     "@hono/zod-openapi": "^0.19.6",
+    "@prisma/client": "^6.8.2",
     "@scalar/hono-api-reference": "^0.8.9",
     "dotenv": "^16.5.0",
     "hono": "^4.7.9",
@@ -29,6 +31,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^16.0.0",
     "prettier": "3.5.3",
+    "prisma": "^6.8.2",
     "tsup": "^8.4.0",
     "tsx": "^4.7.1",
     "typescript": "^5.8.3",
