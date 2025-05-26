@@ -8,11 +8,35 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from scalar_fastapi import get_scalar_api_reference
 import os
+import csv
+import tldextract
 
 # --- Constants e paths ---
 PHISHTANK_API = "https://checkurl.phishtank.com/checkurl/"
 OPENPHISH_API = "https://openphish.com/feed.txt"
-DYNAMIC_DNS_FILE = os.path.join(os.path.dirname(__file__), "data", "dyn_dns_list.txt")
+BASE_DIR = os.path.dirname(__file__)
+DYNAMIC_DNS_FILE = os.path.join(BASE_DIR, "data", "dyn_dns_list.txt")
+OFFICIAL_DOMAINS_FILE = os.path.join(BASE_DIR, "data", "top-1m.csv")
+LEVENSHTEIN_THRESHOLD = 0.2
+MAX_OFFICIAL_CHECK = 50000
+
+# --- Funções utilitárias ---
+def levenshtein_distance(s: str, t: str) -> int:
+    if s == t:
+        return 0
+    if len(s) == 0:
+        return len(t)
+    if len(t) == 0:
+        return len(s)
+    v0 = list(range(len(t) + 1))
+    v1 = [0] * (len(t) + 1)
+    for i in range(len(s)):
+        v1[0] = i + 1
+        for j in range(len(t)):
+            cost = 0 if s[i] == t[j] else 1
+            v1[j + 1] = min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost)
+        v0, v1 = v1, v0
+    return v0[len(t)]
 
 # --- Modelos ---
 class URLRequest(BaseModel):
@@ -29,38 +53,40 @@ class URLAnalysis(BaseModel):
     dynamic_dns: bool
     domain_age_days: int | None
     young_domain: bool | None
+    brand_similarity: bool
     suspicious: bool
 
-# --- Lifespan (startup + shutdown) ---
+# --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Carrega lista de provedores DDNS de arquivo local
     try:
         with open(DYNAMIC_DNS_FILE, "r") as f:
             app.state.dynamic_dns_providers = set(line.strip() for line in f if line.strip())
-        print(f"[startup] Loaded {len(app.state.dynamic_dns_providers)} dynamic DNS providers from {DYNAMIC_DNS_FILE}")
+        print(f"[startup] Loaded {len(app.state.dynamic_dns_providers)} DDNS providers")
     except Exception as e:
         app.state.dynamic_dns_providers = set()
-        print(f"[startup] Failed loading dynamic DNS providers: {e}")
-
-    # Carrega lista do OpenPhish
+        print(f"[startup] DDNS load error: {e}")
+    try:
+        with open(OFFICIAL_DOMAINS_FILE, newline="") as csvfile:
+            reader = csv.reader(csvfile)
+            app.state.official_domains = [row[1].strip().lower() for row in reader if len(row) >= 2]
+        print(f"[startup] Loaded {len(app.state.official_domains)} official domains")
+    except Exception as e:
+        app.state.official_domains = []
+        print(f"[startup] Official domains load error: {e}")
     try:
         resp = requests.get(OPENPHISH_API, timeout=5)
         resp.raise_for_status()
-        app.state.openphish_cache = set(
-            line.strip() for line in resp.text.splitlines() if line.strip()
-        )
+        app.state.openphish_cache = set(line.strip() for line in resp.text.splitlines() if line.strip())
         print(f"[startup] Loaded {len(app.state.openphish_cache)} OpenPhish URLs")
     except Exception as e:
         app.state.openphish_cache = set()
-        print(f"[startup] Failed loading OpenPhish list: {e}")
-
+        print(f"[startup] OpenPhish load error: {e}")
     yield
-
-    # Limpeza de caches ao shutdown
     app.state.dynamic_dns_providers.clear()
+    app.state.official_domains.clear()
     app.state.openphish_cache.clear()
-    print("[shutdown] Cleared dynamic DNS and OpenPhish caches")
+    print("[shutdown] Cleared caches")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -70,67 +96,62 @@ async def analyze_url(request: URLRequest):
     url_str = str(request.url)
     parsed = urlparse(url_str)
     domain = parsed.netloc.lower()
-
-    # 1) PhishTank API
+    # Extrai domínio registrado (remove subdomínios)
+    ext = tldextract.extract(domain)
+    base_domain = f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else domain
+    # Checks
+    # 1. PhishTank
     in_phishtank = False
     try:
         data = {"url": url_str, "format": "json"}
         resp = requests.post(PHISHTANK_API, data=data, timeout=5)
-        result = resp.json()
-        in_phishtank = result.get("results", {}).get("in_database", False)
-    except Exception:
-        in_phishtank = False
-
-    # 2) OpenPhish (cache em app.state)
-    in_openphish = any(
-        url_str.startswith(mal_url) for mal_url in app.state.openphish_cache
-    )
-
-    # 3) Dígitos no domínio
-    numeric_substitution = bool(re.search(r"\d", domain))
-
-    # 4) Subdomínios excessivos (>2 pontos)
+        in_phishtank = resp.json().get("results", {}).get("in_database", False)
+    except:
+        pass
+    # 2. OpenPhish
+    in_openphish = any(url_str.startswith(m) for m in app.state.openphish_cache)
+    # 3. Numeric sub
+    numeric_substitution = bool(re.search(r"\d", base_domain))
+    # 4. Subdomínios
     excessive_subdomains = domain.count('.') > 2
-
-    # 5) Caracteres especiais na URL
+    # 5. Special chars
     special_chars_in_url = bool(re.search(r"[^\w\-\.:/]", url_str))
-
-    # 6) DNS Dinâmico (lista de providers de arquivo)
-    dynamic_dns = any(
-        domain.endswith(provider) for provider in app.state.dynamic_dns_providers
-    )
-
-    # 7) Idade de domínio (WHOIS)
+    # 6. DDNS
+    dynamic_dns = any(base_domain.endswith(p) for p in app.state.dynamic_dns_providers)
+    # 7. Domain age
     domain_age_days = None
     young_domain = None
     try:
-        info = whois.whois(domain)
+        info = whois.whois(base_domain)
         creation = info.creation_date
-        if isinstance(creation, list):
-            creation = creation[0]
+        if isinstance(creation, list): creation = creation[0]
         if isinstance(creation, datetime):
             delta = datetime.utcnow() - creation
             domain_age_days = delta.days
             young_domain = delta.days < 30
-    except Exception:
-        domain_age_days = None
-        young_domain = None
-
-    # Avaliação final
-    flags = [
-        in_phishtank,
-        in_openphish,
-        numeric_substitution,
-        excessive_subdomains,
-        special_chars_in_url,
-        dynamic_dns,
-        young_domain is True
-    ]
-    suspicious = any(flags)
-
+    except:
+        pass
+    # 8. Brand similarity
+    brand_similarity = False
+    # First check if base_domain is itself an official domain
+    if base_domain in app.state.official_domains:
+        brand_similarity = False
+    else:
+        for official in app.state.official_domains[:MAX_OFFICIAL_CHECK]:
+            if official == base_domain:
+                continue
+            dist = levenshtein_distance(base_domain, official)
+            max_len = max(len(base_domain), len(official))
+            if max_len and dist > 0 and (dist / max_len) < LEVENSHTEIN_THRESHOLD:
+                brand_similarity = True
+                break
+    suspicious = any([
+        in_phishtank, in_openphish, numeric_substitution,
+        excessive_subdomains, special_chars_in_url,
+        dynamic_dns, young_domain is True, brand_similarity
+    ])
     return URLAnalysis(
-        url=url_str,
-        domain=domain,
+        url=url_str, domain=domain,
         in_phishtank=in_phishtank,
         in_openphish=in_openphish,
         numeric_substitution=numeric_substitution,
@@ -139,16 +160,13 @@ async def analyze_url(request: URLRequest):
         dynamic_dns=dynamic_dns,
         domain_age_days=domain_age_days,
         young_domain=young_domain,
+        brand_similarity=brand_similarity,
         suspicious=suspicious
     )
 
 @app.get("/health")
-def health_check():
-    return {"status": "ok"}
+def health_check(): return {"status": "ok"}
 
 @app.get("/", include_in_schema=False)
 async def scalar_html():
-    return get_scalar_api_reference(
-        openapi_url=app.openapi_url,
-        title=app.title,
-    )
+    return get_scalar_api_reference(openapi_url=app.openapi_url, title=app.title)
