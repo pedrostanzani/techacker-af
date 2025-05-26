@@ -20,6 +20,7 @@ import {
   ExternalLink,
   Zap,
   ArrowRight,
+  Download,
 } from "lucide-react";
 import Link from "next/link";
 import { GitHub } from "@/components/icons/github";
@@ -33,7 +34,7 @@ export default function HomePage() {
   const [url, setUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
-  const { queries, addQuery } = useQueryStore();
+  const { queries, addQuery, exportToCSV } = useQueryStore();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -165,14 +166,27 @@ export default function HomePage() {
           {queries.length > 0 && (
             <ModernCard>
               <ModernCardHeader>
-                <ModernCardTitle className="flex items-center text-xl">
-                  <Clock className="h-5 w-5 mr-3 text-slate-400" />
-                  Análises de segurança recentes
-                </ModernCardTitle>
-                <ModernCardDescription>
-                  Clique em qualquer análise anterior para visualizar o
-                  relatório
-                </ModernCardDescription>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <ModernCardTitle className="flex items-center text-xl">
+                      <Clock className="h-5 w-5 mr-3 text-slate-400" />
+                      Análises de segurança recentes
+                    </ModernCardTitle>
+                    <ModernCardDescription>
+                      Clique em qualquer análise anterior para visualizar o
+                      relatório
+                    </ModernCardDescription>
+                  </div>
+                  <ModernButton
+                    onClick={exportToCSV}
+                    variant="outline"
+                    size="sm"
+                    className="text-sm"
+                  >
+                    <Download className="h-4 w-4 mr-2" />
+                    Exportar
+                  </ModernButton>
+                </div>
               </ModernCardHeader>
               <ModernCardContent>
                 <div className="space-y-3">

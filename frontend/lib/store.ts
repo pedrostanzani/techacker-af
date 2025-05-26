@@ -40,6 +40,7 @@ interface QueryStore {
   addQuery: (url: string, result: URLAnalysis) => string
   getQuery: (id: string) => Query | undefined
   clearQueries: () => void
+  exportToCSV: () => void
 }
 
 export const useQueryStore = create<QueryStore>()(
@@ -63,6 +64,61 @@ export const useQueryStore = create<QueryStore>()(
         return get().queries.find((query) => query.id === id)
       },
       clearQueries: () => set({ queries: [] }),
+      exportToCSV: () => {
+        const queries = get().queries
+        const headers = [
+          'ID',
+          'URL',
+          'Data',
+          'Suspicious',
+          'Domain',
+          'PhishTank',
+          'OpenPhish',
+          'Numeric Substitution',
+          'Excessive Subdomains',
+          'Special Chars',
+          'Dynamic DNS',
+          'Domain Age',
+          'Young Domain',
+          'Brand Similarity',
+          'Suspicious Redirects',
+          'Suspicious SSL',
+          'Suspicious Forms',
+          'BERT Score'
+        ].join(',')
+
+        const rows = queries.map(query => [
+          query.id,
+          query.url,
+          query.createdAt,
+          query.result.suspicious,
+          query.result.domain,
+          query.result.in_phishtank,
+          query.result.in_openphish,
+          query.result.numeric_substitution,
+          query.result.excessive_subdomains,
+          query.result.special_chars_in_url,
+          query.result.dynamic_dns,
+          query.result.domain_age_days,
+          query.result.young_domain,
+          query.result.brand_similarity,
+          query.result.suspicious_redirects,
+          query.result.suspicious_ssl,
+          query.result.suspicious_html_forms,
+          query.result.bert_phishing_score
+        ].map(value => `"${value}"`).join(','))
+
+        const csvContent = [headers, ...rows].join('\n')
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+        const link = document.createElement('a')
+        const url = URL.createObjectURL(blob)
+        link.setAttribute('href', url)
+        link.setAttribute('download', `phishing-reports-${new Date().toISOString()}.csv`)
+        link.style.visibility = 'hidden'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+      }
     }),
     {
       name: "phishing-detector-queries",
