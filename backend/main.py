@@ -37,6 +37,7 @@ class URLAnalysis(BaseModel):
     domain_age_days: int | None
     young_domain: bool | None
     brand_similarity: bool
+    suspicious_redirects: bool
     suspicious: bool
 
 # --- Lifespan ---
@@ -82,7 +83,7 @@ async def analyze_url(request: URLRequest):
     # Extrai domínio registrado (remove subdomínios)
     ext = tldextract.extract(domain)
     base_domain = f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else domain
-    # Checks
+
     # 1. PhishTank
     in_phishtank = False
     try:
@@ -91,16 +92,22 @@ async def analyze_url(request: URLRequest):
         in_phishtank = resp.json().get("results", {}).get("in_database", False)
     except:
         pass
+
     # 2. OpenPhish
     in_openphish = any(url_str.startswith(m) for m in app.state.openphish_cache)
-    # 3. Numeric sub
+
+    # 3. Numeric substitution
     numeric_substitution = bool(re.search(r"\d", base_domain))
-    # 4. Subdomínios
+
+    # 4. Excessive subdomains
     excessive_subdomains = domain.count('.') > 2
-    # 5. Special chars
+
+    # 5. Special characters in URL
     special_chars_in_url = bool(re.search(r"[^\w\-\.:/]", url_str))
-    # 6. DDNS
+
+    # 6. Dynamic DNS
     dynamic_dns = any(base_domain.endswith(p) for p in app.state.dynamic_dns_providers)
+
     # 7. Domain age
     domain_age_days = None
     young_domain = None
@@ -114,11 +121,10 @@ async def analyze_url(request: URLRequest):
             young_domain = delta.days < 30
     except:
         pass
+
     # 8. Brand similarity
     brand_similarity = False
-    if base_domain in app.state.official_domains:
-        brand_similarity = False
-    else:
+    if base_domain not in app.state.official_domains:
         for official in app.state.official_domains[:MAX_OFFICIAL_CHECK]:
             if official == base_domain:
                 continue
@@ -127,13 +133,37 @@ async def analyze_url(request: URLRequest):
             if max_len and dist > 0 and (dist / max_len) < LEVENSHTEIN_THRESHOLD:
                 brand_similarity = True
                 break
-    suspicious = any([
-        in_phishtank, in_openphish, numeric_substitution,
-        excessive_subdomains, special_chars_in_url,
-        dynamic_dns, young_domain is True, brand_similarity
-    ])
+
+    # 9. Suspicious redirects
+    suspicious_redirects = False
+    try:
+        head_resp = requests.head(url_str, allow_redirects=True, timeout=5)
+        hop_count = len(head_resp.history)
+        final_domain = urlparse(head_resp.url).netloc.lower()
+        ext_final = tldextract.extract(final_domain)
+        base_final = f"{ext_final.domain}.{ext_final.suffix}" if ext_final.domain and ext_final.suffix else final_domain
+        if hop_count > 3 or base_final != base_domain:
+            suspicious_redirects = True
+    except:
+        pass
+
+    # Final suspicious
+    flags = [
+        in_phishtank,
+        in_openphish,
+        numeric_substitution,
+        excessive_subdomains,
+        special_chars_in_url,
+        dynamic_dns,
+        young_domain is True,
+        brand_similarity,
+        suspicious_redirects
+    ]
+    suspicious = any(flags)
+
     return URLAnalysis(
-        url=url_str, domain=domain,
+        url=url_str,
+        domain=domain,
         in_phishtank=in_phishtank,
         in_openphish=in_openphish,
         numeric_substitution=numeric_substitution,
@@ -143,6 +173,7 @@ async def analyze_url(request: URLRequest):
         domain_age_days=domain_age_days,
         young_domain=young_domain,
         brand_similarity=brand_similarity,
+        suspicious_redirects=suspicious_redirects,
         suspicious=suspicious
     )
 
