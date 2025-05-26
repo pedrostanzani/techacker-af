@@ -17,6 +17,8 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.x509.oid import NameOID
 from bs4 import BeautifulSoup
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
 
 # --- Constants e paths ---
 PHISHTANK_API = "https://checkurl.phishtank.com/checkurl/"
@@ -26,6 +28,7 @@ DYNAMIC_DNS_FILE = os.path.join(BASE_DIR, "data", "dyn_dns_list.txt")
 OFFICIAL_DOMAINS_FILE = os.path.join(BASE_DIR, "data", "top-1m.csv")
 LEVENSHTEIN_THRESHOLD = 0.2
 MAX_OFFICIAL_CHECK = 50000
+BERT_MODEL_NAME = "ealvaradob/bert-finetuned-phishing"
 
 # --- Models ---
 class URLRequest(BaseModel):
@@ -37,16 +40,24 @@ class URLAnalysis(BaseModel):
     in_phishtank: bool
     in_openphish: bool
     numeric_substitution: bool
+    substituted_chars: list[str] | None = None
     excessive_subdomains: bool
+    subdomain_count: int | None = None
     special_chars_in_url: bool
+    special_chars: list[str] | None = None
     dynamic_dns: bool
-    domain_age_days: int | None
-    young_domain: bool | None
+    dynamic_dns_provider: str | None = None
+    domain_age_days: int | None = None
+    young_domain: bool | None = None
     brand_similarity: bool
+    similar_brand: str | None = None
     suspicious_redirects: bool
+    redirect_count: int | None = None
+    final_domain: str | None = None
     suspicious_ssl: bool
     ssl_issues: list[str] | None = None
     suspicious_html_forms: bool
+    bert_phishing_score: float | None = None
     suspicious: bool
 
 # --- Lifespan ---
@@ -81,6 +92,16 @@ async def lifespan(app: FastAPI):
         app.state.openphish_cache = set()
         print(f"[startup] OpenPhish load error: {e}")
 
+    # Load BERT model and tokenizer
+    try:
+        app.state.bert_tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
+        app.state.bert_model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_NAME)
+        print("[startup] Loaded BERT model and tokenizer")
+    except Exception as e:
+        app.state.bert_tokenizer = None
+        app.state.bert_model = None
+        print(f"[startup] BERT model load error: {e}")
+
     yield
 
     # Clear caches on shutdown
@@ -88,6 +109,22 @@ async def lifespan(app: FastAPI):
     app.state.official_domains.clear()
     app.state.openphish_cache.clear()
     print("[shutdown] Cleared caches")
+
+def get_bert_phishing_score(text: str, tokenizer, model) -> float:
+    """Get phishing probability score from BERT model."""
+    if not tokenizer or not model:
+        return None
+    
+    try:
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+        with torch.no_grad():
+            outputs = model(**inputs)
+            probabilities = torch.softmax(outputs.logits, dim=1)
+            phishing_prob = probabilities[0][1].item()  # Assuming 1 is the phishing class
+            return phishing_prob
+    except Exception as e:
+        print(f"BERT prediction error: {e}")
+        return None
 
 app = FastAPI(lifespan=lifespan)
 
@@ -116,15 +153,19 @@ async def analyze_url(request: URLRequest):
 
     # 3) Numeric substitution
     numeric_substitution = bool(re.search(r"\d", base_domain))
+    substituted_chars = list(re.findall(r"\d", base_domain)) if numeric_substitution else None
 
     # 4) Excessive subdomains
-    excessive_subdomains = domain.count('.') > 2
+    subdomain_count = domain.count('.')
+    excessive_subdomains = subdomain_count > 2
 
     # 5) Special characters in URL
-    special_chars_in_url = bool(re.search(r"[^\w\-\.:/]", url_str))
+    special_chars = list(re.findall(r"[^\w\-\.:/]", url_str))
+    special_chars_in_url = bool(special_chars)
 
     # 6) Dynamic DNS
-    dynamic_dns = any(base_domain.endswith(p) for p in app.state.dynamic_dns_providers)
+    dynamic_dns_provider = next((p for p in app.state.dynamic_dns_providers if base_domain.endswith(p)), None)
+    dynamic_dns = dynamic_dns_provider is not None
 
     # 7) Domain age via WHOIS
     domain_age_days = None
@@ -142,6 +183,7 @@ async def analyze_url(request: URLRequest):
 
     # 8) Brand similarity (Levenshtein via NLTK)
     brand_similarity = False
+    similar_brand = None
     if base_domain not in app.state.official_domains:
         for official in app.state.official_domains[:MAX_OFFICIAL_CHECK]:
             if official == base_domain:
@@ -150,17 +192,20 @@ async def analyze_url(request: URLRequest):
             max_len = max(len(base_domain), len(official))
             if max_len and dist > 0 and (dist / max_len) < LEVENSHTEIN_THRESHOLD:
                 brand_similarity = True
+                similar_brand = official
                 break
 
     # 9) Suspicious redirects
     suspicious_redirects = False
+    redirect_count = None
+    final_domain = None
     try:
         head_resp = requests.head(url_str, allow_redirects=True, timeout=5)
-        hop_count = len(head_resp.history)
+        redirect_count = len(head_resp.history)
         final_domain = urlparse(head_resp.url).netloc.lower()
         ext_final = tldextract.extract(final_domain)
         base_final = f"{ext_final.domain}.{ext_final.suffix}" if ext_final.domain and ext_final.suffix else final_domain
-        suspicious_redirects = hop_count > 3 or base_final != base_domain
+        suspicious_redirects = redirect_count > 3 or base_final != base_domain
     except:
         pass
 
@@ -262,6 +307,9 @@ async def analyze_url(request: URLRequest):
     except:
         pass
 
+    # BERT-based phishing detection
+    bert_phishing_score = get_bert_phishing_score(url_str, app.state.bert_tokenizer, app.state.bert_model)
+
     # Final suspicious flag
     flags = [
         in_phishtank,
@@ -275,6 +323,7 @@ async def analyze_url(request: URLRequest):
         suspicious_redirects,
         suspicious_ssl,
         suspicious_html_forms,
+        bert_phishing_score is not None and bert_phishing_score > 0.5,  # Add BERT score to flags
     ]
     suspicious = any(flags)
 
@@ -284,16 +333,24 @@ async def analyze_url(request: URLRequest):
         in_phishtank=in_phishtank,
         in_openphish=in_openphish,
         numeric_substitution=numeric_substitution,
+        substituted_chars=substituted_chars,
         excessive_subdomains=excessive_subdomains,
+        subdomain_count=subdomain_count if excessive_subdomains else None,
         special_chars_in_url=special_chars_in_url,
+        special_chars=special_chars if special_chars_in_url else None,
         dynamic_dns=dynamic_dns,
+        dynamic_dns_provider=dynamic_dns_provider,
         domain_age_days=domain_age_days,
         young_domain=young_domain,
         brand_similarity=brand_similarity,
+        similar_brand=similar_brand,
         suspicious_redirects=suspicious_redirects,
+        redirect_count=redirect_count if suspicious_redirects else None,
+        final_domain=final_domain if suspicious_redirects else None,
         suspicious_ssl=suspicious_ssl,
         ssl_issues=ssl_issues,
         suspicious_html_forms=suspicious_html_forms,
+        bert_phishing_score=bert_phishing_score,
         suspicious=suspicious
     )
 
