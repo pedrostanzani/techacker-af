@@ -1,14 +1,17 @@
 annotated-types==0.7.0
 anyio==4.9.0
 certifi==2025.4.26
+cffi==1.17.1
 charset-normalizer==3.4.2
 click==8.2.1
+cryptography==45.0.3
 fastapi==0.115.12
 filelock==3.18.0
 h11==0.16.0
 idna==3.10
 joblib==1.5.1
 nltk==3.9.1
+pycparser==2.22
 pydantic==2.11.5
 pydantic_core==2.33.2
 python-dateutil==2.9.0.post0

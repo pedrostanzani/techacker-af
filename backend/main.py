@@ -4,13 +4,18 @@ from urllib.parse import urlparse
 import re
 import requests
 import whois
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from scalar_fastapi import get_scalar_api_reference
 import os
 import csv
 import tldextract
 from nltk.metrics import edit_distance
+import socket
+import ssl
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.oid import NameOID
 
 # --- Constants e paths ---
 PHISHTANK_API = "https://checkurl.phishtank.com/checkurl/"
@@ -38,11 +43,14 @@ class URLAnalysis(BaseModel):
     young_domain: bool | None
     brand_similarity: bool
     suspicious_redirects: bool
+    suspicious_ssl: bool
+    ssl_issues: list[str] | None = None
     suspicious: bool
 
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load dynamic DNS providers
     try:
         with open(DYNAMIC_DNS_FILE, "r") as f:
             app.state.dynamic_dns_providers = set(line.strip() for line in f if line.strip())
@@ -50,6 +58,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app.state.dynamic_dns_providers = set()
         print(f"[startup] DDNS load error: {e}")
+    # Load official domains
     try:
         with open(OFFICIAL_DOMAINS_FILE, newline="") as csvfile:
             reader = csv.reader(csvfile)
@@ -58,6 +67,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app.state.official_domains = []
         print(f"[startup] Official domains load error: {e}")
+    # Load OpenPhish
     try:
         resp = requests.get(OPENPHISH_API, timeout=5)
         resp.raise_for_status()
@@ -67,6 +77,7 @@ async def lifespan(app: FastAPI):
         app.state.openphish_cache = set()
         print(f"[startup] OpenPhish load error: {e}")
     yield
+    # Clear caches
     app.state.dynamic_dns_providers.clear()
     app.state.official_domains.clear()
     app.state.openphish_cache.clear()
@@ -80,7 +91,7 @@ async def analyze_url(request: URLRequest):
     url_str = str(request.url)
     parsed = urlparse(url_str)
     domain = parsed.netloc.lower()
-    # Extrai domínio registrado (remove subdomínios)
+    # Extract registered domain
     ext = tldextract.extract(domain)
     base_domain = f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else domain
 
@@ -102,7 +113,7 @@ async def analyze_url(request: URLRequest):
     # 4. Excessive subdomains
     excessive_subdomains = domain.count('.') > 2
 
-    # 5. Special characters in URL
+    # 5. Special characters
     special_chars_in_url = bool(re.search(r"[^\w\-\.:/]", url_str))
 
     # 6. Dynamic DNS
@@ -142,22 +153,70 @@ async def analyze_url(request: URLRequest):
         final_domain = urlparse(head_resp.url).netloc.lower()
         ext_final = tldextract.extract(final_domain)
         base_final = f"{ext_final.domain}.{ext_final.suffix}" if ext_final.domain and ext_final.suffix else final_domain
-        if hop_count > 3 or base_final != base_domain:
-            suspicious_redirects = True
+        suspicious_redirects = hop_count > 3 or base_final != base_domain
     except:
         pass
 
-    # Final suspicious
+    # 10. SSL/TLS certificate analysis
+    suspicious_ssl = False
+    ssl_issues = []
+    try:
+        # Establish TLS connection
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((domain, 443), timeout=5) as sock:
+            with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                der = ssock.getpeercert(binary_form=True)
+        cert = x509.load_der_x509_certificate(der, default_backend())
+        # Expiry check
+        now = datetime.now(timezone.utc)
+        
+        # Use recommended UTC-aware datetime methods
+        not_before = cert.not_valid_before_utc
+        not_after = cert.not_valid_after_utc
+        
+        expired = now < not_before or now > not_after
+        if expired:
+            ssl_issues.append(f"Certificate expired: valid {not_before} to {not_after}")
+        
+        # Self-signed check
+        self_signed = cert.issuer == cert.subject
+        if self_signed:
+            ssl_issues.append("Self-signed certificate detected")
+        
+        # Domain coverage check
+        try:
+            san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            sans = san_ext.value.get_values_for_type(x509.DNSName)
+        except:
+            sans = []
+            
+        common_names = [at.value for at in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+        
+        # Check if the exact domain or appropriate wildcard is covered
+        covered = False
+        wildcard_domain = f"*.{'.'.join(domain.split('.')[1:])}"
+        
+        if domain in sans or domain in common_names:
+            covered = True
+        elif wildcard_domain in sans or wildcard_domain in common_names:
+            covered = True
+        
+        if not covered:
+            ssl_issues.append(f"Certificate doesn't cover domain: {domain}")
+            
+        suspicious_ssl = expired or self_signed or not covered
+    except Exception as e:
+        ssl_issues.append(f"SSL check error: {str(e)}")
+        pass
+
+    # Final evaluation
     flags = [
-        in_phishtank,
-        in_openphish,
-        numeric_substitution,
-        excessive_subdomains,
-        special_chars_in_url,
-        dynamic_dns,
-        young_domain is True,
-        brand_similarity,
-        suspicious_redirects
+        in_phishtank, in_openphish, numeric_substitution,
+        excessive_subdomains, special_chars_in_url,
+        dynamic_dns, young_domain is True, brand_similarity,
+        suspicious_redirects, suspicious_ssl
     ]
     suspicious = any(flags)
 
@@ -174,6 +233,8 @@ async def analyze_url(request: URLRequest):
         young_domain=young_domain,
         brand_similarity=brand_similarity,
         suspicious_redirects=suspicious_redirects,
+        suspicious_ssl=suspicious_ssl,
+        ssl_issues=ssl_issues,
         suspicious=suspicious
     )
 
