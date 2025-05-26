@@ -53,10 +53,12 @@ Avaliação final de Tecnologias Hacker (opção 3). Um detector de phishing ava
 
 ## Execução com Docker
 
+Atenção: espere o backend instalar o modelo de machine learning (Hugging Face) para poder executar a aplicação.
+
 1. Clone o repositório
 ```bash
-git clone https://github.com/seu-usuario/detector-phishing.git
-cd detector-phishing
+git clone https://github.com/pedrostanzani/techacker-af
+cd techacker-af
 ```
 
 2. Execute com docker compose
@@ -66,17 +68,19 @@ docker compose up
 
 ## Instalação
 
+Caso prefira, você também pode executar o projeto manualmente.
+
 ### Pré-requisitos
 - Python 3.13+
 - Node.js 22+
-- npm ou yarn
+- npm
 
 ### Backend
 
 1. Clone o repositório
 ```bash
-git clone https://github.com/seu-usuario/detector-phishing.git
-cd detector-phishing
+git clone https://github.com/pedrostanzani/techacker-af
+cd techacker-af
 ```
 
 2. Instale as dependências Python
