@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from urllib.parse import urlparse
 import re
@@ -128,6 +129,15 @@ def get_bert_phishing_score(text: str, tokenizer, model) -> float:
 
 app = FastAPI(lifespan=lifespan)
 
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 # --- Endpoints ---
 @app.post("/analyze", response_model=URLAnalysis)
 async def analyze_url(request: URLRequest):
@@ -157,7 +167,7 @@ async def analyze_url(request: URLRequest):
 
     # 4) Excessive subdomains
     subdomain_count = domain.count('.')
-    excessive_subdomains = subdomain_count > 2
+    excessive_subdomains = subdomain_count > 4
 
     # 5) Special characters in URL
     special_chars = list(re.findall(r"[^\w\-\.:/]", url_str))
