@@ -29,12 +29,21 @@ import { useQueryStore } from "@/lib/store";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 
 export default function HomePage() {
   const [url, setUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState("all");
   const router = useRouter();
   const { queries, addQuery, exportToCSV } = useQueryStore();
+
+  const filteredQueries = queries.filter((query) => {
+    if (activeTab === "all") return true;
+    if (activeTab === "suspicious") return query.result.suspicious;
+    if (activeTab === "safe") return !query.result.suspicious;
+    return true;
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -189,8 +198,15 @@ export default function HomePage() {
                 </div>
               </ModernCardHeader>
               <ModernCardContent>
+                <Tabs defaultValue="all" value={activeTab} onValueChange={setActiveTab} className="mb-4">
+                  <TabsList className="bg-slate-800/90">
+                    <TabsTrigger value="all" className="data-[state=active]:bg-slate-700">Todos</TabsTrigger>
+                    <TabsTrigger value="suspicious" className="data-[state=active]:bg-slate-700">Suspeitos</TabsTrigger>
+                    <TabsTrigger value="safe" className="data-[state=active]:bg-slate-700">Seguros</TabsTrigger>
+                  </TabsList>
+                </Tabs>
                 <div className="space-y-3">
-                  {queries.slice(0, 10).map((query, index) => (
+                  {filteredQueries.slice(0, 10).map((query, index) => (
                     <div
                       key={query.id}
                       onClick={() => handleQueryClick(query.id)}
