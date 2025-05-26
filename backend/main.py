@@ -10,6 +10,7 @@ from scalar_fastapi import get_scalar_api_reference
 import os
 import csv
 import tldextract
+from nltk.metrics import edit_distance
 
 # --- Constants e paths ---
 PHISHTANK_API = "https://checkurl.phishtank.com/checkurl/"
@@ -19,24 +20,6 @@ DYNAMIC_DNS_FILE = os.path.join(BASE_DIR, "data", "dyn_dns_list.txt")
 OFFICIAL_DOMAINS_FILE = os.path.join(BASE_DIR, "data", "top-1m.csv")
 LEVENSHTEIN_THRESHOLD = 0.2
 MAX_OFFICIAL_CHECK = 50000
-
-# --- Funções utilitárias ---
-def levenshtein_distance(s: str, t: str) -> int:
-    if s == t:
-        return 0
-    if len(s) == 0:
-        return len(t)
-    if len(t) == 0:
-        return len(s)
-    v0 = list(range(len(t) + 1))
-    v1 = [0] * (len(t) + 1)
-    for i in range(len(s)):
-        v1[0] = i + 1
-        for j in range(len(t)):
-            cost = 0 if s[i] == t[j] else 1
-            v1[j + 1] = min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost)
-        v0, v1 = v1, v0
-    return v0[len(t)]
 
 # --- Modelos ---
 class URLRequest(BaseModel):
@@ -133,14 +116,13 @@ async def analyze_url(request: URLRequest):
         pass
     # 8. Brand similarity
     brand_similarity = False
-    # First check if base_domain is itself an official domain
     if base_domain in app.state.official_domains:
         brand_similarity = False
     else:
         for official in app.state.official_domains[:MAX_OFFICIAL_CHECK]:
             if official == base_domain:
                 continue
-            dist = levenshtein_distance(base_domain, official)
+            dist = edit_distance(base_domain, official)
             max_len = max(len(base_domain), len(official))
             if max_len and dist > 0 and (dist / max_len) < LEVENSHTEIN_THRESHOLD:
                 brand_similarity = True
