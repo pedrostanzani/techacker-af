@@ -107,14 +107,14 @@ npm install --legacy-peer-deps
 npm run dev
 ```
 
-## 📝 Uso
+## Uso
 
 1. Acesse a interface web em `http://localhost:3000`
 2. Insira a URL que deseja analisar
 3. Aguarde a análise completa
 4. Visualize o relatório detalhado com os resultados
 
-## 🔍 Como Funciona
+## Como Funciona
 
 O detector realiza uma análise em múltiplas camadas:
 
