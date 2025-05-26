@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel, HttpUrl
 from urllib.parse import urlparse
 import re
@@ -16,6 +16,7 @@ import ssl
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.x509.oid import NameOID
+from bs4 import BeautifulSoup
 
 # --- Constants e paths ---
 PHISHTANK_API = "https://checkurl.phishtank.com/checkurl/"
@@ -26,7 +27,7 @@ OFFICIAL_DOMAINS_FILE = os.path.join(BASE_DIR, "data", "top-1m.csv")
 LEVENSHTEIN_THRESHOLD = 0.2
 MAX_OFFICIAL_CHECK = 50000
 
-# --- Modelos ---
+# --- Models ---
 class URLRequest(BaseModel):
     url: HttpUrl
 
@@ -45,12 +46,13 @@ class URLAnalysis(BaseModel):
     suspicious_redirects: bool
     suspicious_ssl: bool
     ssl_issues: list[str] | None = None
+    suspicious_html_forms: bool
     suspicious: bool
 
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load dynamic DNS providers
+    # Dynamic DNS providers
     try:
         with open(DYNAMIC_DNS_FILE, "r") as f:
             app.state.dynamic_dns_providers = set(line.strip() for line in f if line.strip())
@@ -58,7 +60,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app.state.dynamic_dns_providers = set()
         print(f"[startup] DDNS load error: {e}")
-    # Load official domains
+
+    # Official domains list
     try:
         with open(OFFICIAL_DOMAINS_FILE, newline="") as csvfile:
             reader = csv.reader(csvfile)
@@ -67,7 +70,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app.state.official_domains = []
         print(f"[startup] Official domains load error: {e}")
-    # Load OpenPhish
+
+    # OpenPhish list
     try:
         resp = requests.get(OPENPHISH_API, timeout=5)
         resp.raise_for_status()
@@ -76,8 +80,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app.state.openphish_cache = set()
         print(f"[startup] OpenPhish load error: {e}")
+
     yield
-    # Clear caches
+
+    # Clear caches on shutdown
     app.state.dynamic_dns_providers.clear()
     app.state.official_domains.clear()
     app.state.openphish_cache.clear()
@@ -91,11 +97,12 @@ async def analyze_url(request: URLRequest):
     url_str = str(request.url)
     parsed = urlparse(url_str)
     domain = parsed.netloc.lower()
-    # Extract registered domain
+
+    # Registered base domain
     ext = tldextract.extract(domain)
     base_domain = f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else domain
 
-    # 1. PhishTank
+    # 1) PhishTank
     in_phishtank = False
     try:
         data = {"url": url_str, "format": "json"}
@@ -104,22 +111,22 @@ async def analyze_url(request: URLRequest):
     except:
         pass
 
-    # 2. OpenPhish
+    # 2) OpenPhish
     in_openphish = any(url_str.startswith(m) for m in app.state.openphish_cache)
 
-    # 3. Numeric substitution
+    # 3) Numeric substitution
     numeric_substitution = bool(re.search(r"\d", base_domain))
 
-    # 4. Excessive subdomains
+    # 4) Excessive subdomains
     excessive_subdomains = domain.count('.') > 2
 
-    # 5. Special characters
+    # 5) Special characters in URL
     special_chars_in_url = bool(re.search(r"[^\w\-\.:/]", url_str))
 
-    # 6. Dynamic DNS
+    # 6) Dynamic DNS
     dynamic_dns = any(base_domain.endswith(p) for p in app.state.dynamic_dns_providers)
 
-    # 7. Domain age
+    # 7) Domain age via WHOIS
     domain_age_days = None
     young_domain = None
     try:
@@ -133,7 +140,7 @@ async def analyze_url(request: URLRequest):
     except:
         pass
 
-    # 8. Brand similarity
+    # 8) Brand similarity (Levenshtein via NLTK)
     brand_similarity = False
     if base_domain not in app.state.official_domains:
         for official in app.state.official_domains[:MAX_OFFICIAL_CHECK]:
@@ -145,7 +152,7 @@ async def analyze_url(request: URLRequest):
                 brand_similarity = True
                 break
 
-    # 9. Suspicious redirects
+    # 9) Suspicious redirects
     suspicious_redirects = False
     try:
         head_resp = requests.head(url_str, allow_redirects=True, timeout=5)
@@ -211,12 +218,63 @@ async def analyze_url(request: URLRequest):
         ssl_issues.append(f"SSL check error: {str(e)}")
         pass
 
-    # Final evaluation
+    # 11) HTML form analysis (BeautifulSoup)
+    suspicious_html_forms = False
+    try:
+        resp = requests.get(url_str, allow_redirects=True, timeout=5)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Skip form analysis for known legitimate domains
+        if base_domain in app.state.official_domains[:MAX_OFFICIAL_CHECK]:
+            html_forms = False
+        else:
+            for form in soup.find_all('form'):
+                # Check for password fields
+                if form.find('input', {'type': 'password'}):
+                    # Additional checks for suspicious patterns
+                    action = form.get('action', '').lower()
+                    method = form.get('method', '').lower()
+                    
+                    # Check for suspicious form attributes
+                    suspicious_action = any(x in action for x in ['login', 'signin', 'auth', 'account'])
+                    suspicious_method = method == 'post'  # POST methods are more likely to be login forms
+                    
+                    # Check for suspicious input names
+                    suspicious_inputs = False
+                    for inp in form.find_all('input'):
+                        name = inp.get('name', '').lower()
+                        if any(kw in name for kw in ('login', 'username', 'email', 'password', 'passwd', 'pwd')):
+                            suspicious_inputs = True
+                            break
+                    
+                    # Check for suspicious form IDs or classes
+                    form_id = form.get('id', '').lower()
+                    form_class = form.get('class', [])
+                    suspicious_attributes = any(x in form_id for x in ['login', 'signin', 'auth']) or \
+                                          any(any(x in c.lower() for x in ['login', 'signin', 'auth']) for c in form_class)
+                    
+                    if suspicious_inputs and (suspicious_action or suspicious_method or suspicious_attributes):
+                        suspicious_html_forms = True
+                        break
+                
+                if suspicious_html_forms:
+                    break
+    except:
+        pass
+
+    # Final suspicious flag
     flags = [
-        in_phishtank, in_openphish, numeric_substitution,
-        excessive_subdomains, special_chars_in_url,
-        dynamic_dns, young_domain is True, brand_similarity,
-        suspicious_redirects, suspicious_ssl
+        in_phishtank,
+        in_openphish,
+        numeric_substitution,
+        excessive_subdomains,
+        special_chars_in_url,
+        dynamic_dns,
+        young_domain is True,
+        brand_similarity,
+        suspicious_redirects,
+        suspicious_ssl,
+        suspicious_html_forms,
     ]
     suspicious = any(flags)
 
@@ -235,11 +293,13 @@ async def analyze_url(request: URLRequest):
         suspicious_redirects=suspicious_redirects,
         suspicious_ssl=suspicious_ssl,
         ssl_issues=ssl_issues,
+        suspicious_html_forms=suspicious_html_forms,
         suspicious=suspicious
     )
 
 @app.get("/health")
-def health_check(): return {"status": "ok"}
+def health_check():
+    return {"status": "ok"}
 
 @app.get("/", include_in_schema=False)
 async def scalar_html():
